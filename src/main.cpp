@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <AutoOTA.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <Ticker.h>
@@ -26,6 +27,7 @@ const char* topic_Clock = "demo/time";
 const char* topic_temper_incar = "demo/t_incar";
      //подписки
 const char* topic_Clock_set = "demo/time1";
+const char* topic_reset = "demo/reset";
 //----------------------------------------------------
 int i;
 int8_t flag_minuta = 1;
@@ -41,7 +43,8 @@ uint8_t sec=1;
 Ticker timerCounter;
 WiFiClient espClient;                       //экземпляр WIFI клиента
 PubSubClient client(espClient);             // экземпляр mqtt клиента
-GyverDS18Single ds(4);                 //инициализация датчика DS18B20 на пине D4, с паразитным питанием
+GyverDS18Single ds(4);                     //инициализация датчика DS18B20 на пине D4, с паразитным питанием
+AutoOTA ota("0.2", "Srvrn1/esp32_start");  //======================
 
 void WiFi_connect(){
   volatile int8_t n = 2;
@@ -95,7 +98,7 @@ void callback(char* topic, byte* payload, unsigned int length) {   // Функц
   }
   Serial.println();
 
-  if(strcmp(topic, topic_Clock_set) == 0){                             // Установка времени
+  if(strcmp(topic, topic_Clock_set) == 0){                        // Установка времени
     String data = "";
     data += (char)payload[0];
     data += (char)payload[1];
@@ -110,6 +113,10 @@ void callback(char* topic, byte* payload, unsigned int length) {   // Функц
     sec = data.toInt();
 
     flag_minuta = 1;    //сразу публикуем
+  }
+
+  else if(strcmp(topic, topic_reset) == 0){                      //перезагрузка
+    ESP.restart();
   }
  
 }
@@ -142,7 +149,7 @@ void reconnect_MQTT() {                                           // Функц�
     client.connect(mqttClientId.c_str(), mqttUser, mqttPass);
 
       // ======================================После подключения можно подписаться на топики (если нужно)
-      //client.subscribe(topic_mqtt_OUT, Qos);
+      client.subscribe(topic_reset, Qos);
       client.subscribe(topic_Clock_set, Qos);
       //client.subscribe(topic_start, Qos);
 
@@ -210,12 +217,28 @@ void setup() {
   Serial.println();
   WiFi_connect();
   reconnect_MQTT();
+
+  Serial.println("текущая версия:  " + ota.version());
+  Serial.println("Проверка обновлений...");                  //проверка обновлений
+  String ver, notes;
+  if (ota.checkUpdate(&ver, &notes)) {
+    Serial.println("Обновление доступно!");
+    Serial.print("Версия: ");
+    Serial.println(ver);
+    Serial.print("Описание: ");
+    Serial.println(notes);
+    ota.updateNow();
+  }
+  else {
+    Serial.println("Обновлений нет!");
+  }
+  
   ds.setResolution(10);
   timerCounter.attach(1.0, timer1);  // Запуск прерывания по таймеру 1 раз в секунду
 }
 
 void loop() {
-  if (!client.connected()) reconnect_MQTT();    //если режим mqtt и соединение разорвано
+  if (!client.connected()) reconnect_MQTT();    //если соединение разорвано
   client.loop();
   
   if(flag_minuta) publish();                 //отправка сообщения
