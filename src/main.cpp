@@ -23,13 +23,28 @@ const char* mqttPass = "HilZPRjD";
 const int   Qos = 1;
 //================================================топики
      //публикация
-const char* topic_Clock = "demo/time";
-const char* topic_temper_incar = "demo/t_incar";
+const char* topic_Clock = "demo/time";             //время
+const char* topic_temper_incar = "demo/t_incar";   //Температура
+const char* topic_handbrake = "demo/hbrake";       //состояние ручника
+const char* topic_kppsens = "demo/kpp";            // 1 - нейтральная передача
      //подписки
-const char* topic_Clock_set = "demo/time1";
-const char* topic_reset = "demo/reset";
+const char* topic_Clock_set = "demo/time1";        //для установки времени
+const char* topic_reset = "demo/reset";            //для перезагрузки
+const char* topic_start = "demo/start";            //команда для запуска
 //----------------------------------------------------
-int i;
+#define zik 2                                  // Пин зажигание
+#define starter 16                             // Стартер
+#define otopitel 17                             // печка
+#define gabarit 18                             // габариты
+
+#define kpp_sens 19                            //КПП
+#define tormoz 21                              // контроль Ручник
+#define flash 23                               //прерывание сигнал с катушки
+//----------------------------------ПЕРЕМЕННЫЕ
+int8_t state_tormoz;                          //состояние ручника
+int8_t was_tormoz;                            //в каком сост был ручник
+int8_t state_N;                               //состояние нейтральной передачи
+int8_t was_N;                                 //в каком сост был нейтраль
 int8_t flag_minuta = 1;
 uint8_t count_connect;                       // счетчик кол-ва подключений к mqtt
 int8_t flag_getTemp = 0;                     //что бы не повторять запросы ds18 несколько раз
@@ -44,7 +59,7 @@ Ticker timerCounter;
 WiFiClient espClient;                       //экземпляр WIFI клиента
 PubSubClient client(espClient);             // экземпляр mqtt клиента
 GyverDS18Single ds(4);                     //инициализация датчика DS18B20 на пине D4, с паразитным питанием
-AutoOTA ota("0.2", "Srvrn1/esp32_start");  //======================
+AutoOTA ota("0.3", "Srvrn1/esp32_start");  //======================
 
 void WiFi_connect(){
   volatile int8_t n = 2;
@@ -135,7 +150,6 @@ void timer1() {
       if(hrs == 24)hrs = 0;
     }
   }
-//------------------------------
 }
 
 void reconnect_MQTT() {                                           // Функция переподключения к MQTT брокеру
@@ -151,7 +165,7 @@ void reconnect_MQTT() {                                           // Функц�
       // ======================================После подключения можно подписаться на топики (если нужно)
       client.subscribe(topic_reset, Qos);
       client.subscribe(topic_Clock_set, Qos);
-      //client.subscribe(topic_start, Qos);
+      client.subscribe(topic_start, Qos);
 
 
      if(client.connected()){
@@ -211,8 +225,39 @@ void publish(){
   }
 }
 
+void pinsMode(){
+  pinMode(zik, OUTPUT);
+  pinMode(starter, OUTPUT);
+  pinMode(otopitel, OUTPUT);
+  pinMode(gabarit , OUTPUT);
+
+  digitalWrite(zik, LOW);          
+  digitalWrite(starter, LOW);
+  digitalWrite(otopitel, LOW);
+  digitalWrite(gabarit, LOW);
+  
+  pinMode(kpp_sens, INPUT_PULLUP);
+  pinMode(tormoz, INPUT_PULLUP);
+  pinMode(flash, INPUT_PULLUP);
+}
+
+void sensor_read(){
+  state_tormoz = digitalRead(tormoz);  //======читаем датчик тормоза
+  if(state_tormoz != was_tormoz){            //если тормоз изменился
+    was_tormoz = state_tormoz;
+   client.publish(topic_handbrake, state_tormoz ? "1" : "0"); //отправка сообщения
+   Serial.println("тормоз изменился");
+  }
+  state_N = digitalRead(kpp_sens);  //======читаем датчик нейтральной передачи
+  if(state_N != was_N){            //если нейтральная передача изменился
+    was_N = state_N;
+   client.publish(topic_kppsens, state_N ? "1" : "0"); //отправка сообщения
+    Serial.println("нейтральная передача изменилась");
+  }
+}
 
 void setup() {
+  pinsMode();
   Serial.begin(115200);
   Serial.println();
   WiFi_connect();
@@ -233,14 +278,15 @@ void setup() {
     Serial.println("Обновлений нет!");
   }
   
-  ds.setResolution(10);
+  ds.setResolution(10);              //Установка разрешениe датчика ds18
+  sensor_read();
   timerCounter.attach(1.0, timer1);  // Запуск прерывания по таймеру 1 раз в секунду
 }
 
 void loop() {
   if (!client.connected()) reconnect_MQTT();    //если соединение разорвано
   client.loop();
-  
+  sensor_read();
   if(flag_minuta) publish();                 //отправка сообщения
   if(sec > 55 && !flag_getTemp){             //Запрос температуры
     flag_getTemp = 1;

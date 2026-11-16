@@ -1,11 +1,11 @@
 {
   "name": "ESP32 Start",
   "about": "Эксперементальная обкатка ",
-  "version": "0.2",
+  "version": "0.3",
   "notes": "реализованы улучшения",
   "builds": [
     {
-      "chipFamily": "ESP8266",
+      "chipFamily": "ESP32",
       "parts": [
         {
           "path": "https://raw.githubusercontent.com/Srvrn1/esp32_start/main/bin/firmware.bin",
