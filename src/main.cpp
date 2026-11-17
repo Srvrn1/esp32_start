@@ -21,12 +21,13 @@ const char* mqttUser = "u_5A3C2X";
 const char* mqttPass = "HilZPRjD";
 
 const int   Qos = 1;
-//================================================топики
+//============================================================топики
      //публикация
 const char* topic_Clock = "demo/time";             //время
 const char* topic_temper_incar = "demo/t_incar";   //Температура
 const char* topic_handbrake = "demo/hbrake";       //состояние ручника
 const char* topic_kppsens = "demo/kpp";            // 1 - нейтральная передача
+const char* topic_dvs_state = "demo/dvs_state";    //состояние двигателя
      //подписки
 const char* topic_Clock_set = "demo/time1";        //для установки времени
 const char* topic_reset = "demo/reset";            //для перезагрузки
@@ -45,10 +46,15 @@ int8_t state_tormoz;                          //состояние ручник�
 int8_t was_tormoz;                            //в каком сост был ручник
 int8_t state_N;                               //состояние нейтральной передачи
 int8_t was_N;                                 //в каком сост был нейтраль
+int8_t state_dvs;                             // 0 - двигатель не работает, 1 - двигатель запускается, 2 - двигатель работает
+int8_t was_dvs;                               //в каком сост был двигатель
+
 int8_t flag_minuta = 1;
 uint8_t count_connect;                       // счетчик кол-ва подключений к mqtt
 int8_t flag_getTemp = 0;                     //что бы не повторять запросы ds18 несколько раз
-
+volatile unsigned long lastPulseTime = 0;    //для прерывания
+volatile unsigned long period = 0;           // период между импульсами в млс
+volatile int8_t was_interrupt = 0;           //флаг что было прерывание
 //--------------------------------------------------clock
 uint8_t hrs=1;
 uint8_t minut=1;
@@ -113,7 +119,7 @@ void callback(char* topic, byte* payload, unsigned int length) {   // Функц
   }
   Serial.println();
 
-  if(strcmp(topic, topic_Clock_set) == 0){                        // Установка времени
+  if(strcmp(topic, topic_Clock_set) == 0){                       // Установка времени
     String data = "";
     data += (char)payload[0];
     data += (char)payload[1];
@@ -137,8 +143,9 @@ void callback(char* topic, byte* payload, unsigned int length) {   // Функц
 }
 
 void timer1() {
+  was_interrupt--;                                   //
   //---------------------
-  sec++;             //ход часов
+  sec++;                           //ход часов
   Serial.println(sec);
   if(sec == 60) {
     flag_minuta = 1;
@@ -150,6 +157,13 @@ void timer1() {
       if(hrs == 24)hrs = 0;
     }
   }
+
+  //------------------------------проверка состояния двигателя
+  if(!was_interrupt) {                      //если прошло больше 2 сек с последнего импульса
+    was_interrupt=1;
+    state_dvs = 0;                              //если прошло больше 100млс, то двигатель не работает
+  }   
+  //Serial.println(period);
 }
 
 void reconnect_MQTT() {                                           // Функция переподключения к MQTT брокеру
@@ -242,7 +256,7 @@ void pinsMode(){
 }
 
 void sensor_read(){
-  state_tormoz = digitalRead(tormoz);  //======читаем датчик тормоза
+  state_tormoz = digitalRead(tormoz);  //======читаем датчик ручника
   if(state_tormoz != was_tormoz){            //если тормоз изменился
     was_tormoz = state_tormoz;
    client.publish(topic_handbrake, state_tormoz ? "1" : "0"); //отправка сообщения
@@ -254,15 +268,31 @@ void sensor_read(){
    client.publish(topic_kppsens, state_N ? "1" : "0"); //отправка сообщения
     Serial.println("нейтральная передача изменилась");
   }
+  if(state_dvs != was_dvs){            //если состояние двигателя изменилось
+    was_dvs = state_dvs;
+    char msg[3];                                     //буфер для сообщения
+    snprintf(msg, sizeof(msg), "%d", state_dvs);
+    client.publish(topic_dvs_state, msg);            //отправка сообщения
+    Serial.println("состояние двигателя изменилось");
+  }
+}
+
+void IRAM_ATTR onPulse() {                             //прерывание для определения оборотов двигателя
+  was_interrupt = 2;                                   //флаг что было прерывание
+  unsigned long now = millis();
+  period = now - lastPulseTime;
+  lastPulseTime = now;
+  if(period < 100) state_dvs = 2;             //если период меньше 100млс, то двигатель работает
 }
 
 void setup() {
   pinsMode();
+  digitalWrite(zik, HIGH); 
   Serial.begin(115200);
   Serial.println();
   WiFi_connect();
   reconnect_MQTT();
-
+  ds.setResolution(10);              //Установка разрешениe датчика ds18
   Serial.println("текущая версия:  " + ota.version());
   Serial.println("Проверка обновлений...");                  //проверка обновлений
   String ver, notes;
@@ -277,9 +307,10 @@ void setup() {
   else {
     Serial.println("Обновлений нет!");
   }
+  digitalWrite(zik, LOW); 
   
-  ds.setResolution(10);              //Установка разрешениe датчика ds18
   sensor_read();
+  attachInterrupt(digitalPinToInterrupt(flash), onPulse, RISING);  // Запуск прерывания на пине flesh
   timerCounter.attach(1.0, timer1);  // Запуск прерывания по таймеру 1 раз в секунду
 }
 
@@ -295,7 +326,6 @@ void loop() {
       Serial.println("request error");
     }
   }
-
 
   if(WiFi.status() != WL_CONNECTED) WiFi_connect();  //WIFI проверяем палюбому
 }
