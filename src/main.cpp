@@ -28,13 +28,14 @@ const char* topic_temper_incar = "demo/t_incar";   //Температура
 const char* topic_handbrake = "demo/hbrake";       //состояние ручника
 const char* topic_kppsens = "demo/kpp";            // 1 - нейтральная передача
 const char* topic_dvs_state = "demo/dvs_state";    //состояние двигателя
+const char* topic_timeHot = "demo/tHot";           //таймер прогрева
      //подписки
 const char* topic_Clock_set = "demo/time1";        //для установки времени
 const char* topic_reset = "demo/reset";            //для перезагрузки
 const char* topic_start = "demo/start";            //команда для запуска
 //----------------------------------------------------
-#define zik 2                                  // Пин зажигание
-#define starter 16                             // Стартер
+#define zik 16                                  // Пин зажигание
+#define starter 2                             // Стартер
 #define otopitel 17                             // печка
 #define gabarit 18                             // габариты
 
@@ -48,6 +49,8 @@ int8_t state_N;                               //состояние нейтра�
 int8_t was_N;                                 //в каком сост был нейтраль
 int8_t state_dvs;                             // 0 - двигатель не работает, 1 - двигатель запускается, 2 - двигатель работает
 int8_t was_dvs;                               //в каком сост был двигатель
+int8_t state_heating;                         //состояние прогрева двигателя
+int8_t flag_msg;                              //чобы не отправлять mqtt бесконечно таймер прогрева
 
 int8_t flag_minuta = 1;
 uint8_t count_connect;                       // счетчик кол-ва подключений к mqtt
@@ -55,6 +58,7 @@ int8_t flag_getTemp = 0;                     //что бы не повторят
 volatile unsigned long lastPulseTime = 0;    //для прерывания
 volatile unsigned long period = 0;           // период между импульсами в млс
 volatile int8_t was_interrupt = 0;           //флаг что было прерывание
+volatile int16_t count_heating = 0;          //счетчик времени прогрева двигателя
 //--------------------------------------------------clock
 uint8_t hrs=1;
 uint8_t minut=1;
@@ -65,7 +69,7 @@ Ticker timerCounter;
 WiFiClient espClient;                       //экземпляр WIFI клиента
 PubSubClient client(espClient);             // экземпляр mqtt клиента
 GyverDS18Single ds(4);                     //инициализация датчика DS18B20 на пине D4, с паразитным питанием
-AutoOTA ota("0.3", "Srvrn1/esp32_start");  //======================
+AutoOTA ota("0.4", "Srvrn1/esp32_start");  //======================
 
 void WiFi_connect(){
   volatile int8_t n = 2;
@@ -109,13 +113,15 @@ void WiFi_connect(){
   }
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {   // Функция щбработки сообщения MQTT
+void callback(char* topic, byte* payload, unsigned int length) {   // Функция обработки сообщения MQTT
+  char msg[6];
   Serial.print("Сообщение в топике [");
   Serial.print(topic);
   Serial.print("]: ");
   
   for (unsigned int i = 0; i < length; i++) {
     Serial.print((char)payload[i]);
+    msg[i]=(char)payload[i];
   }
   Serial.println();
 
@@ -140,15 +146,39 @@ void callback(char* topic, byte* payload, unsigned int length) {   // Функц
     ESP.restart();
   }
  
+  else if(strcmp(topic, topic_start) == 0){                      //сигнал для запуска двигателя
+    if(!state_heating){
+      state_heating = 1;
+      Serial.println("Запуск двигателя");
+    }
+    else{
+      state_heating = 0;
+      client.publish(topic_timeHot, "0");          //отправка сообщения
+      digitalWrite(zik, LOW);                      //выключаем зажигание
+      state_dvs = 0;
+    }
+  }
+
+  else if(strcmp(topic, topic_timeHot) == 0){                    //установка таймера работы двс
+    if(state_dvs==2 && state_heating ){
+      count_heating = atoi(msg) * 60;
+      Serial.print("таймер ");
+      Serial.println(count_heating);
+    }
+  }
 }
 
 void timer1() {
+  count_heating--;                                   //счетчик времени прогрева двигателя
   was_interrupt--;                                   //
+  Serial.println(count_heating);
+ 
   //---------------------
   sec++;                           //ход часов
   Serial.println(sec);
   if(sec == 60) {
     flag_minuta = 1;
+    flag_msg = 0;                 //для отправки mqtt оставшееся время прогрева
     sec = 0;
     minut++;
     if(minut == 60){
@@ -159,9 +189,9 @@ void timer1() {
   }
 
   //------------------------------проверка состояния двигателя
-  if(!was_interrupt) {                      //если прошло больше 2 сек с последнего импульса
-    was_interrupt=1;
-    state_dvs = 0;                              //если прошло больше 100млс, то двигатель не работает
+  if(!was_interrupt && state_dvs !=1) {      //если прошло больше 2 сек с последнего импульса
+    was_interrupt=1;                         //и не состояние запуска
+    state_dvs = 0;                          //если прошло боль то двигатель не работает
   }   
   //Serial.println(period);
 }
@@ -180,6 +210,7 @@ void reconnect_MQTT() {                                           // Функц�
       client.subscribe(topic_reset, Qos);
       client.subscribe(topic_Clock_set, Qos);
       client.subscribe(topic_start, Qos);
+      client.subscribe(topic_timeHot, Qos);
 
 
      if(client.connected()){
@@ -285,6 +316,57 @@ void IRAM_ATTR onPulse() {                             //прерывание д
   if(period < 100) state_dvs = 2;             //если период меньше 100млс, то двигатель работает
 }
 
+void heating(){
+  if(!state_dvs){                            //======если двигатель сост 0
+    if(state_N && state_tormoz){
+      state_dvs = 1;                           //процесс запуска двс
+      Serial.println("зажигание вкл");
+      digitalWrite(zik, HIGH);
+      count_heating = 4;                      //время вкл зажигания 4 сек
+    }  
+    else{
+      state_heating = 0;
+      client.publish(topic_timeHot, "0");          //отправка сообщения
+      digitalWrite(zik, LOW);                      //выключаем зажигание
+      
+    }                    
+  }
+
+  if(state_dvs == 1 && count_heating < 0) {  //============если двс в состоянии запуска
+    count_heating = 3;                       //засекаем время стартера
+    while (count_heating && state_dvs !=2){  //крутим стартер пока не кончится время или не запустится двс
+      digitalWrite(starter, HIGH);
+    }
+    digitalWrite(starter, LOW);
+    if(state_dvs == 2){                          //если двс запустился
+      count_heating = 1200;                      //время вкл зажигания 1200 сек
+    }
+    else{
+      state_heating = 0;
+      state_dvs = 0;
+      Serial.println("зажигание выкл");
+      digitalWrite(zik, LOW);                   //выключаем зажигание
+    }
+  }
+
+  if(state_dvs == 2 && count_heating > 0){      //идет прогрев, отправляем время прогрева
+    if(count_heating % 60 == 0 && !flag_msg){
+      flag_msg = 1;
+      char msg[4];                                     //буфер для сообщения
+      snprintf(msg, sizeof(msg), "%d", count_heating/60);
+      client.publish(topic_timeHot, msg);            //отправка сообщения
+    }
+  }
+
+  if(state_dvs == 2 && count_heating <= 0) {     //==================если кончилось время
+    Serial.println("зажигание выкл");
+    client.publish(topic_timeHot, "0");          //отправка сообщения
+    digitalWrite(zik, LOW);                      //выключаем зажигание
+    state_heating = 0;
+  }
+           
+}
+
 void setup() {
   pinsMode();
   digitalWrite(zik, HIGH); 
@@ -318,6 +400,7 @@ void loop() {
   if (!client.connected()) reconnect_MQTT();    //если соединение разорвано
   client.loop();
   sensor_read();
+  if(state_heating) heating();                //если двигатель запускается, то проверяем его состояние
   if(flag_minuta) publish();                 //отправка сообщения
   if(sec > 55 && !flag_getTemp){             //Запрос температуры
     flag_getTemp = 1;
